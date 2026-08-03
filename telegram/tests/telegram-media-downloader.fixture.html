@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <base href="/telegram/tests/">
+  <title>Telegram legacy media detail downloader fixture</title>
+  <style>
+    html, body { margin: 0; min-height: 100%; }
+    .media-viewer-whole { position: fixed; inset: 0; background: #17212b; }
+    .media-viewer-topbar { height: 52px; display: flex; justify-content: flex-end; }
+    .media-viewer-buttons { display: flex; align-items: center; width: 160px; }
+    .media-viewer-aspecter { position: relative; width: 640px; height: 360px; }
+    video { width: 320px; height: 180px; }
+  </style>
+  <script>
+    history.replaceState(null, '', '/k/#-1001638419819');
+
+    window.fixture = {
+      errors: [],
+      fetches: [],
+      downloads: [],
+      notifications: [],
+      objectUrls: [],
+      animationFrames: 0,
+    };
+
+    window.GM_getValue = (_key, fallback) => fallback;
+    window.GM_setValue = () => undefined;
+    window.GM_registerMenuCommand = () => undefined;
+    window.GM_notification = (details) => window.fixture.notifications.push(details);
+
+    window.addEventListener('error', (event) => {
+      window.fixture.errors.push(event.error?.stack || event.message || 'window error');
+    });
+    window.addEventListener('unhandledrejection', (event) => {
+      window.fixture.errors.push(event.reason?.stack || String(event.reason));
+    });
+
+    window.requestAnimationFrame = (callback) => window.setTimeout(
+      () => {
+        window.fixture.animationFrames += 1;
+        callback(performance.now());
+      },
+      0
+    );
+    window.cancelAnimationFrame = (id) => window.clearTimeout(id);
+
+    window.fetch = async (input, init) => {
+      const url = new URL(String(input), location.href).href;
+      const range = new Headers(init?.headers).get('Range');
+      window.fixture.fetches.push({ url, range });
+      const pathname = new URL(url).pathname;
+
+      if (pathname === '/media/fail.mp4') {
+        return new Response(new Uint8Array([5, 0, 0]), {
+          status: 500,
+          headers: { 'Content-Type': 'text/plain' },
+        });
+      }
+
+      if (pathname === '/media/no-content-range.mp4') {
+        return new Response(new Uint8Array([1, 2]), {
+          status: 206,
+          headers: { 'Content-Type': 'video/mp4' },
+        });
+      }
+
+      if (pathname === '/media/range.mp4') {
+        const payload = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
+        const match = range?.match(/^bytes=(\d+)-(\d+)$/);
+        if (!match) return new Response(null, { status: 400 });
+        const start = Number(match[1]);
+        const requestedEnd = Number(match[2]);
+        const servedEnd = Math.min(start + 2, requestedEnd, payload.length - 1);
+        return new Response(payload.slice(start, servedEnd + 1), {
+          status: 206,
+          headers: {
+            'Content-Type': 'video/mp4',
+            'Content-Range': `bytes ${start}-${servedEnd}/${payload.length}`,
+          },
+        });
+      }
+
+      return new Response(new Uint8Array([1, 2, 3, 4]), {
+        status: 200,
+        headers: { 'Content-Type': 'video/mp4', 'Content-Length': '4' },
+      });
+    };
+
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: (blob) => {
+        const url = `blob:fixture-downloaded-video-${window.fixture.objectUrls.length + 1}`;
+        window.fixture.objectUrls.push({ url, size: blob.size, type: blob.type });
+        return url;
+      },
+    });
+    URL.revokeObjectURL = () => undefined;
+
+    HTMLAnchorElement.prototype.click = function() {
+      window.fixture.downloads.push({ url: this.href, name: this.download });
+    };
+  </script>
+  <script src="../telegram-media-downloader.user.js"></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <video id="sidebar-video" data-video="/media/sidebar.mp4"></video>
+  </aside>
+
+  <script>
+    function wait(milliseconds) {
+      return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+    }
+
+    async function waitFor(predicate, message, timeout = 3000) {
+      const started = performance.now();
+      while (!predicate()) {
+        if (performance.now() - started > timeout) throw new Error(message);
+        await wait(20);
+      }
+    }
+
+    function assert(condition, message) {
+      if (!condition) throw new Error(message);
+    }
+
+    async function runFixture() {
+      await new Promise((resolve) => {
+        if (document.readyState === 'complete') resolve();
+        else window.addEventListener('load', resolve, { once: true });
+      });
+
+      const viewer = document.createElement('section');
+      viewer.className = 'media-viewer-whole';
+      viewer.innerHTML = `
+        <div class="MediaViewerContent" hidden>
+          <video id="hidden-old-video" data-video="/media/hidden-old.mp4"></video>
+        </div>
+        <div class="media-viewer-topbar">
+          <div class="media-viewer-buttons"></div>
+        </div>
+        <div class="media-viewer-movers">
+          <div class="media-viewer-aspecter">
+            <div class="ckin__player">
+              <video id="detail-video" data-video="/media/detail-one.mp4"></video>
+            </div>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(viewer);
+
+      await waitFor(
+        () => viewer.querySelector('.media-viewer-buttons > .tg-download-btn--viewer'),
+        'detail toolbar download icon was not created'
+      );
+
+      const toolbar = viewer.querySelector('.media-viewer-buttons');
+      const detailVideo = viewer.querySelector('#detail-video');
+      let detailButton = toolbar.querySelector('.tg-download-btn--viewer');
+      assert(detailButton.parentElement === toolbar, 'detail icon was not mounted in the viewer toolbar');
+      const toolbarRect = toolbar.getBoundingClientRect();
+      const detailButtonRect = detailButton.getBoundingClientRect();
+      assert(detailButtonRect.width === 36 && detailButtonRect.height === 36,
+        'detail icon did not keep its stable 36px size');
+      assert(detailButtonRect.left >= toolbarRect.left && detailButtonRect.right <= toolbarRect.right &&
+        detailButtonRect.top >= toolbarRect.top && detailButtonRect.bottom <= toolbarRect.bottom,
+      'detail icon escaped the viewer toolbar');
+      assert(detailButton.querySelector('svg') && !detailButton.textContent.trim(),
+        'detail control is not an icon-only button');
+      assert(detailButton.title === '下载视频' && detailButton.getAttribute('aria-label') === '下载视频',
+        'detail icon is missing its accessible label');
+      assert(new URL(detailButton.dataset.mediaUrl, location.href).pathname === '/media/detail-one.mp4',
+        'hidden old viewer media took priority over the active video');
+      assert(!detailVideo.hasAttribute('data-tg-processed'),
+        'media was permanently marked before its URL could update');
+
+      detailVideo.innerHTML = '<source src="/media/old-source.mp4" type="video/mp4">';
+      detailVideo.src = '/media/detail-two.mp4';
+      await waitFor(
+        () => new URL(detailButton.dataset.mediaUrl, location.href).pathname === '/media/detail-two.mp4',
+        'detail icon did not refresh after the video source changed'
+      );
+
+      for (let index = 0; index < 500; index += 1) {
+        viewer.classList.toggle('fixture-active', index % 2 === 0);
+      }
+      await wait(80);
+      assert(viewer.querySelectorAll('.tg-download-btn--viewer').length === 1,
+        'viewer mutations duplicated the detail download icon');
+      const idleFrameBaseline = window.fixture.animationFrames;
+      await wait(120);
+      const idleAnimationFrames = window.fixture.animationFrames - idleFrameBaseline;
+      assert(idleAnimationFrames <= 1,
+        'viewer download icon caused a continuous media scan loop');
+
+      detailButton.click();
+      await waitFor(() => window.fixture.downloads.length === 1, 'detail video download did not start');
+      assert(window.fixture.fetches.length === 1 &&
+        new URL(window.fixture.fetches[0].url).pathname === '/media/detail-two.mp4',
+      'detail download did not use the latest video URL');
+      assert(window.fixture.fetches[0].range === 'bytes=0-1',
+        'detail download did not probe the source with a bounded Range request');
+
+      const fetchesBeforeMissingSource = window.fixture.fetches.length;
+      detailVideo.removeAttribute('src');
+      detailVideo.removeAttribute('data-video');
+      detailVideo.replaceChildren();
+      detailButton.click();
+      await wait(40);
+      assert(window.fixture.fetches.length === fetchesBeforeMissingSource,
+        'detail button fell back to the previous media URL while the next item was loading');
+      await waitFor(
+        () => !viewer.querySelector('.tg-download-btn--viewer'),
+        'stale detail button remained visible while the active media had no URL'
+      );
+      detailVideo.dataset.video = '/media/detail-three.mp4';
+      await waitFor(
+        () => viewer.querySelector('.tg-download-btn--viewer'),
+        'detail button was not restored when the new media URL became available'
+      );
+      detailButton = viewer.querySelector('.tg-download-btn--viewer');
+      assert(new URL(detailButton.dataset.mediaUrl, location.href).pathname === '/media/detail-three.mp4',
+        'restored detail button did not bind the newly loaded media URL');
+
+      toolbar.remove();
+      const replacementToolbar = document.createElement('div');
+      replacementToolbar.className = 'media-viewer-buttons';
+      viewer.querySelector('.media-viewer-topbar').appendChild(replacementToolbar);
+      await waitFor(
+        () => replacementToolbar.querySelector('.tg-download-btn--viewer'),
+        'detail icon was not restored after the toolbar was recreated'
+      );
+      detailButton = replacementToolbar.querySelector('.tg-download-btn--viewer');
+      assert(detailButton.dataset.mediaType === 'video', 'restored detail icon lost its media type');
+
+      const message = document.createElement('article');
+      message.className = 'message-media';
+      message.innerHTML = '<video data-video="/media/message-one.mp4"></video>';
+      document.body.appendChild(message);
+      await waitFor(
+        () => message.querySelector(':scope > .tg-download-btn:not(.tg-download-btn--viewer)'),
+        'message media download icon was not created'
+      );
+
+      const messageVideo = message.querySelector('video');
+      const messageButton = message.querySelector('.tg-download-btn');
+      const rangeFetchIndex = window.fixture.fetches.length;
+      messageVideo.dataset.video = '/media/range.mp4';
+      messageButton.click();
+      await waitFor(() => window.fixture.downloads.length === 2,
+        'Range media did not produce a complete download');
+      const rangeFetches = window.fixture.fetches.slice(rangeFetchIndex);
+      assert(rangeFetches.length === 4 &&
+        rangeFetches.every((request) => new URL(request.url).pathname === '/media/range.mp4'),
+      'the first click after data-video changed used a stale media URL');
+      assert(rangeFetches.map((request) => request.range).join(',') ===
+        'bytes=0-1,bytes=0-7,bytes=3-7,bytes=6-7',
+      'Range responses were not resumed from the server-reported end offset');
+      assert(window.fixture.objectUrls.at(-1)?.size === 8,
+        'Range media was saved before all declared bytes arrived');
+
+      let progressItem = document.querySelector('#tg-progress-container > div:last-child');
+      assert(progressItem.querySelector('.filename').textContent !== '完成' &&
+        progressItem.querySelector('.tg-progress-counter').textContent === '完成' &&
+        progressItem.querySelector('.tg-progress-fill').style.width === '100%',
+      'download completion state was written to the wrong progress elements');
+
+      const downloadsBeforeFailure = window.fixture.downloads.length;
+      const failuresBeforeClick = window.fixture.notifications.filter((item) => item.title === '下载失败').length;
+      messageVideo.dataset.video = '/media/fail.mp4';
+      messageButton.click();
+      await waitFor(
+        () => window.fixture.notifications.filter((item) => item.title === '下载失败').length > failuresBeforeClick,
+        'HTTP failure did not update the download status'
+      );
+      assert(window.fixture.downloads.length === downloadsBeforeFailure,
+        'HTTP failure still created a downloadable file');
+      progressItem = document.querySelector('#tg-progress-container > div:last-child');
+      assert(progressItem.querySelector('.filename').textContent !== '失败' &&
+        progressItem.querySelector('.tg-progress-counter').textContent === '失败' &&
+        progressItem.querySelector('.tg-progress-fill').style.width === '100%',
+      'download failure state was written to the wrong progress elements');
+
+      const downloadsBeforeInvalidRange = window.fixture.downloads.length;
+      const failuresBeforeInvalidRange = window.fixture.notifications
+        .filter((item) => item.title === '下载失败').length;
+      messageVideo.dataset.video = '/media/no-content-range.mp4';
+      messageButton.click();
+      await waitFor(
+        () => window.fixture.notifications.filter((item) => item.title === '下载失败').length >
+          failuresBeforeInvalidRange,
+        'partial 206 response without Content-Range was not rejected'
+      );
+      assert(window.fixture.downloads.length === downloadsBeforeInvalidRange,
+        'partial 206 response without Content-Range created a truncated download');
+
+      assert(!document.querySelector('.sidebar .tg-download-btn'),
+        'chat sidebar media received a download icon');
+      assert(window.fixture.notifications.some((item) => item.title === '下载完成'),
+        'successful detail download did not notify completion');
+      assert(window.fixture.errors.length === 0,
+        `fixture observed runtime errors: ${window.fixture.errors.join(' | ')}`);
+
+      document.body.dataset.testResult = 'passed';
+      document.body.dataset.testDetails = JSON.stringify({
+        detailUrl: detailButton.dataset.mediaUrl,
+        fetches: window.fixture.fetches,
+        downloads: window.fixture.downloads,
+        objectUrls: window.fixture.objectUrls,
+        idleAnimationFrames,
+        viewerButtonGeometry: {
+          viewport: [window.innerWidth, window.innerHeight],
+          button: {
+            left: detailButtonRect.left,
+            top: detailButtonRect.top,
+            right: detailButtonRect.right,
+            bottom: detailButtonRect.bottom,
+            width: detailButtonRect.width,
+            height: detailButtonRect.height,
+          },
+          toolbar: {
+            left: toolbarRect.left,
+            top: toolbarRect.top,
+            right: toolbarRect.right,
+            bottom: toolbarRect.bottom,
+          },
+        },
+        viewerButtons: viewer.querySelectorAll('.tg-download-btn--viewer').length,
+        messageButton: Boolean(message.querySelector('.tg-download-btn')),
+      });
+    }
+
+    window.setTimeout(() => {
+      runFixture().catch((error) => {
+        document.body.dataset.testResult = 'failed';
+        document.body.dataset.testError = error.stack || error.message;
+      });
+    }, 0);
+
+    window.setTimeout(() => {
+      if (!document.body.dataset.testResult) {
+        document.body.dataset.testResult = 'failed';
+        document.body.dataset.testError = 'fixture timeout';
+      }
+    }, 8000);
+  </script>
+</body>
+</html>

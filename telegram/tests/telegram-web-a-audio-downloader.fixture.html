@@ -1,0 +1,1051 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <base href="/telegram/tests/">
+  <title>Telegram Web A safe media downloader fixture</title>
+  <style>
+    html,
+    body {
+      margin: 0;
+      min-height: 100%;
+    }
+
+    body {
+      font: 14px/1.4 system-ui, sans-serif;
+    }
+
+    main {
+      width: min(420px, calc(100vw - 32px));
+      padding: 16px;
+    }
+
+    .Message {
+      margin-bottom: 18px;
+    }
+
+    .Audio {
+      display: flex;
+      align-items: center;
+      width: 320px;
+      height: 64px;
+      padding: 8px;
+      background: #eef3f7;
+    }
+
+    .media-inner,
+    video.full-media {
+      display: block;
+      width: 320px;
+      height: 180px;
+    }
+
+    .media-inner {
+      background: #222b33;
+    }
+
+    #mutation-surface {
+      display: none;
+    }
+  </style>
+  <script>
+    history.replaceState(null, '', '/a/#-1001638419819');
+
+    const HOST_ID = 'tgwa-safe-media-download-root';
+    const INSTANCE_KEY = Symbol.for('tgwa-safe-media-downloader.instance');
+    const own = (object, property) => Object.prototype.hasOwnProperty.call(object, property);
+
+    window.fixture = {
+      errors: [],
+      hostAtFirstLoadListener: undefined,
+      hostBeforeLoad: undefined,
+      readyStateBeforeLoad: undefined,
+      nativeMouseDownCalls: 0,
+      nativeClickCalls: 0,
+      shadowDownloads: [],
+      streamMode: 'success',
+      streamPayload: [11, 22, 33, 44, 55, 66, 77],
+      streamFetches: [],
+      streamSaveAttempts: [],
+      streamChunkDelays: [],
+      viewerButtonGeometry: undefined,
+      prototypes: {
+        mediaPlay: HTMLMediaElement.prototype.play,
+        mediaPlayDescriptor: Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'play'),
+        audioPlay: HTMLAudioElement.prototype.play,
+        audioPlayDescriptor: Object.getOwnPropertyDescriptor(HTMLAudioElement.prototype, 'play'),
+        audioHadOwnPlay: own(HTMLAudioElement.prototype, 'play'),
+        workerAddEventListener: Worker.prototype.addEventListener,
+        broadcastAddEventListener: BroadcastChannel.prototype.addEventListener,
+      },
+    };
+
+    window.fixture.nativeSavePickerDescriptor =
+      Object.getOwnPropertyDescriptor(window, 'showSaveFilePicker');
+    Object.defineProperty(window, 'showSaveFilePicker', {
+      configurable: true,
+      writable: true,
+      value: undefined,
+    });
+
+    window.addEventListener('error', (event) => {
+      window.fixture.errors.push(event.error?.stack || event.message || 'window error');
+    });
+    window.addEventListener('unhandledrejection', (event) => {
+      window.fixture.errors.push(event.reason?.stack || String(event.reason));
+    });
+    window.addEventListener('load', () => {
+      window.fixture.hostAtFirstLoadListener = Boolean(document.getElementById(HOST_ID));
+    }, { once: true });
+
+    window.fixtureServiceWorker = new EventTarget();
+    window.fixtureServiceWorker.controller = null;
+    Object.defineProperty(navigator, 'serviceWorker', {
+      configurable: true,
+      value: window.fixtureServiceWorker,
+    });
+
+    // Chrome virtual time can defer compositor frames until after timer-driven assertions.
+    window.requestAnimationFrame = (callback) => window.setTimeout(
+      () => callback(performance.now()),
+      0
+    );
+    window.cancelAnimationFrame = (id) => window.clearTimeout(id);
+
+    window.fixtureDbReady = new Promise((resolve) => {
+      const request = indexedDB.open('tt-data');
+      request.onupgradeneeded = () => {
+        if (!request.result.objectStoreNames.contains('store')) {
+          request.result.createObjectStore('store');
+        }
+      };
+      request.onerror = () => {
+        window.fixture.errors.push(`IndexedDB open failed: ${request.error?.message || 'unknown error'}`);
+        resolve(false);
+      };
+      request.onsuccess = () => {
+        const database = request.result;
+        let transaction;
+        try {
+          transaction = database.transaction('store', 'readwrite');
+          const store = transaction.objectStore('store');
+          store.put({
+            messages: {
+              byChatId: {
+                '-1001638419819': {
+                  byId: {
+                    101: {
+                      id: 101,
+                      chatId: '-1001638419819',
+                      content: {
+                        voice: {
+                          mediaType: 'voice',
+                          id: '6302988330787152047',
+                          fileName: '主账户 原始语音.oga',
+                          mimeType: 'audio/ogg',
+                        },
+                      },
+                    },
+                    606: {
+                      id: 606,
+                      chatId: '-1001638419819',
+                      content: {
+                        video: {
+                          mediaType: 'video',
+                          id: '800006',
+                          fileName: 'pending-video.mp4',
+                          mimeType: 'video/mp4',
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+              webPageById: {},
+            },
+          }, 'tt-global-state');
+          store.delete('tt-global-state_2');
+        } catch (error) {
+          window.fixture.errors.push(`IndexedDB setup failed: ${error.message}`);
+          database.close();
+          resolve(false);
+          return;
+        }
+        transaction.oncomplete = () => {
+          database.close();
+          resolve(true);
+        };
+        transaction.onerror = () => {
+          window.fixture.errors.push(`IndexedDB transaction failed: ${transaction.error?.message || 'unknown error'}`);
+          database.close();
+          resolve(false);
+        };
+      };
+    });
+
+    window.fixtureWriteDelayedMetadata = () => new Promise((resolve) => {
+      const request = indexedDB.open('tt-data');
+      request.onerror = () => resolve(false);
+      request.onsuccess = () => {
+        const database = request.result;
+        const transaction = database.transaction('store', 'readwrite');
+        transaction.objectStore('store').put({
+          messages: {
+            byChatId: {
+              '-1001638419819': {
+                byId: {
+                  101: {
+                    id: 101,
+                    chatId: '-1001638419819',
+                    content: {
+                      voice: {
+                        mediaType: 'voice',
+                        id: '6302988330787152047',
+                        fileName: '主账户 原始语音.oga',
+                        mimeType: 'audio/ogg',
+                      },
+                    },
+                  },
+                  505: {
+                    id: 505,
+                    chatId: '-1001638419819',
+                    content: {
+                      voice: {
+                        mediaType: 'voice',
+                        id: '700005',
+                        mimeType: 'audio/ogg',
+                      },
+                    },
+                  },
+                  606: {
+                    id: 606,
+                    chatId: '-1001638419819',
+                    content: {
+                      video: {
+                        mediaType: 'video',
+                        id: '800006',
+                        fileName: 'pending-video.mp4',
+                        mimeType: 'video/mp4',
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            webPageById: {},
+          },
+        }, 'tt-global-state');
+        transaction.oncomplete = () => {
+          database.close();
+          resolve(true);
+        };
+        transaction.onerror = () => {
+          database.close();
+          resolve(false);
+        };
+      };
+    });
+  </script>
+  <script src="../telegram-web-a-audio-downloader.user.js"></script>
+  <script src="../telegram-media-downloader.user.js"></script>
+</head>
+<body>
+  <main id="telegram-root">
+    <section class="Message message-list-item" data-message-id="101" id="main-voice-message">
+      <div class="Audio inline" id="main-voice">
+        <div class="toogle-play-wrapper play">
+          <button class="toggle-play" type="button" aria-label="Play voice">Play voice</button>
+        </div>
+        <div class="content">
+          <div class="waveform"><canvas></canvas></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="Message message-list-item" data-message-id="202" id="second-video-message">
+      <div class="media-inner">
+        <video
+          class="full-media"
+          id="second-video"
+          src="./progressive/document800002?account=2"
+          muted
+        ></video>
+      </div>
+    </section>
+
+    <section class="Message message-list-item" data-message-id="303" id="native-audio-message">
+      <div class="Audio inline" id="native-audio">
+        <div class="toogle-play-wrapper play">
+          <button class="toggle-play" type="button" aria-label="Play audio">Play audio</button>
+        </div>
+        <div class="content">
+          <p class="title" title="Native audio">Native audio</p>
+        </div>
+        <button class="download-button" type="button" aria-label="Download">Native download</button>
+      </div>
+    </section>
+
+    <section class="Message message-list-item" data-message-id="404" id="one-time-message">
+      <div class="Audio inline non-interactive" id="one-time-voice">
+        <div class="toogle-play-wrapper play">
+          <button class="toggle-play" type="button" aria-label="Play once">Play once</button>
+          <span class="icon-view-once"></span>
+        </div>
+        <div class="content">
+          <div class="waveform"><canvas></canvas></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="Message message-list-item" data-message-id="505" id="delayed-voice-message">
+      <div class="Audio inline" id="delayed-voice">
+        <div class="toogle-play-wrapper play">
+          <button class="toggle-play" type="button" aria-label="Play delayed voice">Play delayed voice</button>
+        </div>
+        <div class="content">
+          <div class="waveform"><canvas></canvas></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="Message message-list-item" data-message-id="606" id="pending-video-message">
+      <div class="media-inner" id="pending-video">
+        <span class="message-media-duration">00:12</span>
+        <button class="icon-large-play" type="button" aria-label="Play pending video"></button>
+      </div>
+    </section>
+
+    <div id="mutation-surface" aria-hidden="true"></div>
+  </main>
+
+  <script>
+    window.fixture.hostBeforeLoad = Boolean(document.getElementById(HOST_ID));
+    window.fixture.readyStateBeforeLoad = document.readyState;
+
+    const nativeDownloadButton = document.querySelector('#native-audio > .download-button');
+    const nativeFetchDescriptor = Object.getOwnPropertyDescriptor(window, 'fetch');
+    const nativeSavePickerDescriptor = window.fixture.nativeSavePickerDescriptor;
+    nativeDownloadButton.addEventListener('mousedown', () => {
+      window.fixture.nativeMouseDownCalls += 1;
+    });
+    nativeDownloadButton.addEventListener('click', (event) => {
+      event.preventDefault();
+      window.fixture.nativeClickCalls += 1;
+    });
+
+    function sameDescriptor(left, right) {
+      if (!left || !right) return left === right;
+      return left.configurable === right.configurable &&
+        left.enumerable === right.enumerable &&
+        left.writable === right.writable &&
+        left.value === right.value &&
+        left.get === right.get &&
+        left.set === right.set;
+    }
+
+    function wait(milliseconds) {
+      return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+    }
+
+    async function settleLayout() {
+      await wait(50);
+    }
+
+    async function waitFor(predicate, message, timeout = 3000) {
+      const deadline = performance.now() + timeout;
+      while (!predicate()) {
+        if (performance.now() >= deadline) throw new Error(message);
+        await wait(20);
+      }
+    }
+
+    function assert(condition, message) {
+      if (!condition) throw new Error(message);
+    }
+
+    function pointAt(element) {
+      element.dispatchEvent(new PointerEvent('pointerover', {
+        bubbles: true,
+        composed: true,
+        pointerType: 'mouse',
+      }));
+    }
+
+    function createResponseStream(chunks) {
+      return new ReadableStream({
+        async start(controller) {
+          for (const chunk of chunks) {
+            const chunkDelay = window.fixture.streamChunkDelays.shift() || 0;
+            if (chunkDelay) await wait(chunkDelay);
+            controller.enqueue(new Uint8Array(chunk));
+          }
+          controller.close();
+        },
+      });
+    }
+
+    function installStreamingSaveMocks() {
+      Object.defineProperty(window, 'showSaveFilePicker', {
+        configurable: true,
+        writable: true,
+        value: async (options) => {
+          const attempt = {
+            mode: window.fixture.streamMode,
+            options,
+            createWritableCalls: 0,
+            chunks: [],
+            closed: false,
+            aborted: false,
+          };
+          window.fixture.streamSaveAttempts.push(attempt);
+
+          if (attempt.mode === 'abort') {
+            throw new DOMException('Save cancelled by fixture', 'AbortError');
+          }
+
+          return {
+            async createWritable() {
+              attempt.createWritableCalls += 1;
+              const sink = {
+                write(chunk) {
+                  const bytes = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+                  attempt.chunks.push(...bytes);
+                },
+                close() {
+                  attempt.closed = true;
+                },
+                abort() {
+                  attempt.aborted = true;
+                },
+              };
+              const writable = new WritableStream(sink);
+              // FileSystemWritableFileStream also exposes write() directly.
+              writable.write = (chunk) => Promise.resolve(sink.write(chunk));
+              return writable;
+            },
+          };
+        },
+      });
+
+      Object.defineProperty(window, 'fetch', {
+        configurable: true,
+        writable: true,
+        value: async (input, init) => {
+          const url = input instanceof Request ? input.url : new URL(String(input), location.href).href;
+          if (!new URL(url).pathname.includes('/progressive/document')) {
+            return nativeFetchDescriptor.value.call(window, input, init);
+          }
+
+          const range = new Headers(init?.headers).get('Range');
+          const record = {
+            mode: window.fixture.streamMode,
+            url,
+            init,
+            range,
+            pageUrl: location.href,
+          };
+          window.fixture.streamFetches.push(record);
+          if (record.mode === 'http500') {
+            return new Response(createResponseStream([[5, 0, 0]]), {
+              status: 500,
+              statusText: 'Internal Server Error',
+              headers: { 'Content-Type': 'text/plain' },
+            });
+          }
+          if (record.mode === 'timeout') {
+            record.hasAbortSignal = init?.signal instanceof AbortSignal;
+            await wait(40);
+            throw new DOMException('Fixture range request timed out', 'AbortError');
+          }
+
+          const match = range?.match(/^bytes=(\d+)-(\d+)$/);
+          if (!match) {
+            return new Response(null, { status: 400, statusText: 'Range Required' });
+          }
+
+          const start = Number(match[1]);
+          const requestedEnd = Number(match[2]);
+          const payload = window.fixture.streamPayload;
+          if (start >= payload.length || requestedEnd < start) {
+            return new Response(null, {
+              status: 416,
+              headers: { 'Content-Range': `bytes */${payload.length}` },
+            });
+          }
+
+          // Serve at most three bytes so the downloader must follow Content-Range
+          // and issue multiple ordered requests even when it asks for a large part.
+          const servedEnd = Math.min(start + 2, requestedEnd, payload.length - 1);
+          const bytes = payload.slice(start, servedEnd + 1);
+          record.servedStart = start;
+          record.servedEnd = servedEnd;
+          record.totalBytes = payload.length;
+          const midpoint = Math.min(1, bytes.length);
+          const bodyChunks = [bytes.slice(0, midpoint), bytes.slice(midpoint)]
+            .filter((chunk) => chunk.length);
+
+          return new Response(createResponseStream(bodyChunks), {
+            status: 206,
+            headers: {
+              'Content-Length': String(bytes.length),
+              'Content-Range': `bytes ${start}-${servedEnd}/${payload.length}`,
+              'Content-Type': 'video/mp4',
+            },
+          });
+        },
+      });
+    }
+
+    function restoreStreamingSaveMocks() {
+      if (nativeSavePickerDescriptor) {
+        Object.defineProperty(window, 'showSaveFilePicker', nativeSavePickerDescriptor);
+      } else {
+        delete window.showSaveFilePicker;
+      }
+      Object.defineProperty(window, 'fetch', nativeFetchDescriptor);
+    }
+
+    function assertUntouchedPrototypes() {
+      const original = window.fixture.prototypes;
+      assert(HTMLMediaElement.prototype.play === original.mediaPlay,
+        'HTMLMediaElement.prototype.play was modified');
+      assert(sameDescriptor(
+        Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'play'),
+        original.mediaPlayDescriptor
+      ), 'HTMLMediaElement.prototype.play descriptor was modified');
+      assert(HTMLAudioElement.prototype.play === original.audioPlay,
+        'HTMLAudioElement.prototype.play was modified');
+      assert(own(HTMLAudioElement.prototype, 'play') === original.audioHadOwnPlay,
+        'HTMLAudioElement.prototype gained or lost an own play property');
+      assert(sameDescriptor(
+        Object.getOwnPropertyDescriptor(HTMLAudioElement.prototype, 'play'),
+        original.audioPlayDescriptor
+      ), 'HTMLAudioElement.prototype.play descriptor was modified');
+      assert(Worker.prototype.addEventListener === original.workerAddEventListener,
+        'Worker.prototype.addEventListener was modified');
+      assert(BroadcastChannel.prototype.addEventListener === original.broadcastAddEventListener,
+        'BroadcastChannel.prototype.addEventListener was modified');
+    }
+
+    async function runFixture() {
+      document.body.dataset.testProgress = 'started';
+      assert(window.fixture.hostBeforeLoad === false, 'host existed before window load');
+      assert(window.fixture.readyStateBeforeLoad !== 'complete', 'fixture did not exercise pre-load setup');
+      assert(window.fixture.hostAtFirstLoadListener === false,
+        'downloader initialized before the page load listener ran');
+
+      const databaseReady = await window.fixtureDbReady;
+      assert(databaseReady, 'fixture IndexedDB was not prepared');
+      document.body.dataset.testProgress = 'database-ready';
+
+      const host = document.getElementById(HOST_ID);
+      const downloadHost = document.getElementById('tgwa-safe-media-download-context');
+      assert(host, 'downloader host was not created after load');
+      assert(downloadHost, 'stable download context was not created after load');
+      assert(host.parentElement === document.documentElement,
+        'downloader host is not a direct child of documentElement');
+      assert(downloadHost.parentElement === document.documentElement,
+        'download context is not a direct child of documentElement');
+      assert(!document.body.contains(host), 'downloader host was inserted into body');
+      assert(!document.body.contains(downloadHost), 'download context was inserted into body');
+      assert(!document.getElementById('tg-progress-container'),
+        'legacy media downloader did not exit on Telegram Web A');
+      assert(!document.querySelector('.tg-download-btn'),
+        'legacy media downloader injected a button on Telegram Web A');
+      assert(!Array.from(document.querySelectorAll('.Audio')).some((audio) => audio.contains(host)),
+        'downloader host was inserted into a Telegram Audio node');
+      assert(host.shadowRoot, 'downloader host has no open shadow root');
+
+      const shadowButton = host.shadowRoot.querySelector('button.download-button');
+      assert(shadowButton, 'shadow download button was not created');
+      document.addEventListener('click', (event) => {
+        const anchor = event.target instanceof HTMLAnchorElement &&
+          event.target.dataset.tgwaSafeDownload === 'true' ? event.target : undefined;
+        if (!anchor) return;
+        event.preventDefault();
+        const isolated = Array.from(downloadHost.querySelectorAll('iframe'))
+          .some((frame) => frame.name === anchor.target);
+        window.fixture.shadowDownloads.push({
+          name: anchor.download,
+          url: anchor.href,
+          target: anchor.target,
+          isolated,
+        });
+      }, true);
+
+      assertUntouchedPrototypes();
+      await settleLayout();
+      document.body.dataset.testProgress = 'layout-ready';
+
+      const mainVoice = document.getElementById('main-voice');
+      pointAt(mainVoice);
+      await settleLayout();
+      assert(!shadowButton.hidden, 'main-account voice was not selectable');
+      shadowButton.click();
+      await wait(80);
+      assert(!host.dataset.lastDownloadName,
+        'voice download started before Telegram service worker was ready');
+      window.fixtureServiceWorker.controller = {};
+      window.fixtureServiceWorker.dispatchEvent(new Event('controllerchange'));
+      await waitFor(
+        () => host.dataset.lastDownloadName === '主账户 原始语音.oga',
+        'main-account voice download was not created'
+      );
+      document.body.dataset.testProgress = 'voice-downloaded';
+
+      const voiceUrl = new URL(host.dataset.lastDownloadUrl);
+      assert(voiceUrl.pathname.endsWith('/download/document6302988330787152047'),
+        'main-account voice lost precision in its 19-digit document id');
+      assert(voiceUrl.searchParams.has('download'),
+        'main-account voice URL is missing the download flag');
+      assert(voiceUrl.searchParams.get('filename') === '主账户 原始语音.oga',
+        'main-account voice did not preserve the original filename');
+      assert(!voiceUrl.searchParams.has('account'),
+        'main-account voice unexpectedly added an account parameter');
+
+      const secondVideo = document.getElementById('second-video');
+      pointAt(secondVideo);
+      await settleLayout();
+      assert(host.dataset.activeKind === 'video' && !shadowButton.hidden,
+        'second-account video was not selected');
+      shadowButton.click();
+      await waitFor(
+        () => host.dataset.lastDownloadName === '800002.mp4',
+        'second-account video download was not created'
+      );
+      document.body.dataset.testProgress = 'video-downloaded';
+
+      const videoUrl = new URL(host.dataset.lastDownloadUrl);
+      assert(videoUrl.pathname.endsWith('/download/document800002'),
+        'video URL did not use the progressive source document id');
+      assert(videoUrl.searchParams.has('download'), 'video URL is missing the download flag');
+      assert(videoUrl.searchParams.get('account') === '2',
+        'video URL did not preserve account=2');
+      assert(videoUrl.searchParams.get('filename') === '800002.mp4',
+        'video fallback filename is incorrect');
+
+      const viewer = document.createElement('dialog');
+      viewer.id = 'MediaViewer';
+      viewer.style.cssText = 'position:fixed;left:24px;top:24px;margin:0;padding:0;display:block;';
+      viewer.innerHTML = `
+        <div class="media-viewer-head" style="display:flex;width:min(640px,calc(100vw - 48px));height:52px;align-items:center;">
+          <div class="MediaViewerActions" style="display:flex;margin-left:auto;">
+            <button class="tel-download" type="button" aria-label="Third-party download">
+              <i class="icon-download"></i>
+            </button>
+          </div>
+        </div>
+        <div class="MediaViewerSlide--active">
+          <div class="VideoPlayer" style="position:relative;">
+            <div class="protector" id="viewer-protector" style="position:absolute;inset:0;z-index:2;"></div>
+            <video class="full-media" src="./progressive/document800003" muted></video>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(viewer);
+      viewer.showModal();
+      await waitFor(
+        () => host.parentElement === viewer && host.dataset.activeKind === 'video',
+        'MediaViewer observer did not activate the asynchronously created detail page'
+      );
+      assert(host.dataset.activeKind === 'video' && host.parentElement === viewer,
+        'opening MediaViewer did not automatically activate its detail download icon');
+      const viewerProtector = viewer.querySelector('#viewer-protector');
+      pointAt(viewerProtector);
+      await settleLayout();
+      assert(host.dataset.activeKind === 'video' && !shadowButton.hidden,
+        'protected MediaViewer surface did not select its active video');
+      assert(host.parentElement === viewer,
+        'download UI was not mounted inside the modal MediaViewer');
+      assert(shadowButton.dataset.context === 'viewer' &&
+        shadowButton.getBoundingClientRect().top < 80,
+      'detail download icon was not aligned with the MediaViewer header');
+      const viewerButtonRect = shadowButton.getBoundingClientRect();
+      const viewerHeadRect = viewer.querySelector('.media-viewer-head').getBoundingClientRect();
+      const viewerActionsRect = viewer.querySelector('.MediaViewerActions').getBoundingClientRect();
+      assert(viewerButtonRect.width === 36 && viewerButtonRect.height === 36,
+        'detail download icon did not keep its stable 36px size');
+      assert(viewerButtonRect.left >= viewerHeadRect.left &&
+        viewerButtonRect.right <= viewerActionsRect.left &&
+        viewerButtonRect.top >= viewerHeadRect.top &&
+        viewerButtonRect.bottom <= viewerHeadRect.bottom,
+      'detail download icon overlapped or escaped the MediaViewer header actions');
+      window.fixture.viewerButtonGeometry = {
+        viewport: [window.innerWidth, window.innerHeight],
+        button: {
+          left: viewerButtonRect.left,
+          top: viewerButtonRect.top,
+          right: viewerButtonRect.right,
+          bottom: viewerButtonRect.bottom,
+          width: viewerButtonRect.width,
+          height: viewerButtonRect.height,
+        },
+        actionsLeft: viewerActionsRect.left,
+        headRight: viewerHeadRect.right,
+      };
+      assert(document.elementFromPoint(
+        viewerButtonRect.left + viewerButtonRect.width / 2,
+        viewerButtonRect.top + viewerButtonRect.height / 2
+      ) === host, 'download UI remained behind the modal MediaViewer');
+      const viewerVideo = viewer.querySelector('video');
+      viewerVideo.src = './progressive/document800004';
+      pointAt(viewerProtector);
+      await settleLayout();
+      shadowButton.click();
+      await waitFor(
+        () => host.dataset.lastDownloadName === '800004.mp4',
+        'MediaViewer did not download the latest source after reusing its video element'
+      );
+      const viewerUrl = new URL(host.dataset.lastDownloadUrl);
+      assert(viewerUrl.pathname.endsWith('/download/document800004'),
+        'MediaViewer reused stale metadata after its progressive source changed');
+      viewer.close();
+      viewer.remove();
+      assert(downloadHost.isConnected && window.fixture.shadowDownloads.length >= 3,
+        'closing MediaViewer removed the active download context');
+      document.body.dataset.testProgress = 'viewer-downloaded';
+
+      const pendingVideo = document.getElementById('pending-video');
+      pendingVideo.scrollIntoView({ block: 'center' });
+      await settleLayout();
+      pointAt(pendingVideo);
+      await settleLayout();
+      assert(host.dataset.activeKind === 'video' && !shadowButton.hidden,
+        'video container without a mounted video element was not selected');
+      shadowButton.click();
+      await waitFor(
+        () => host.dataset.lastDownloadName === 'pending-video.mp4',
+        'pending video did not resolve through Telegram message metadata'
+      );
+      const pendingVideoUrl = new URL(host.dataset.lastDownloadUrl);
+      assert(pendingVideoUrl.pathname.endsWith('/download/document800006'),
+        'pending video did not use its message document id');
+      document.body.dataset.testProgress = 'pending-video-downloaded';
+
+      const generatedUrlBeforeNative = host.dataset.lastDownloadUrl;
+      pointAt(document.getElementById('native-audio'));
+      await settleLayout();
+      shadowButton.click();
+      await waitFor(
+        () => window.fixture.nativeClickCalls === 1,
+        'Telegram native audio download button was not called'
+      );
+      assert(window.fixture.nativeMouseDownCalls === 1,
+        'native audio download did not receive the expected mousedown');
+      assert(host.dataset.lastDownloadUrl === generatedUrlBeforeNative,
+        'script generated a URL instead of prioritizing native audio download');
+      document.body.dataset.testProgress = 'native-downloaded';
+
+      const delayedVoice = document.getElementById('delayed-voice');
+      delayedVoice.scrollIntoView({ block: 'center' });
+      await settleLayout();
+      pointAt(delayedVoice);
+      await settleLayout();
+      assert(!shadowButton.hidden && host.dataset.activeKind === 'audio',
+        'delayed voice was not selected in the visible viewport');
+      shadowButton.click();
+      await wait(200);
+      assert(shadowButton.dataset.state === 'busy',
+        'delayed metadata download did not wait for Telegram state');
+      assert(await window.fixtureWriteDelayedMetadata(),
+        'failed to write delayed Telegram metadata');
+      await waitFor(
+        () => host.dataset.lastDownloadName === '700005.ogg',
+        'download did not resume after Telegram metadata became available',
+        4000
+      );
+      const delayedUrl = new URL(host.dataset.lastDownloadUrl);
+      assert(delayedUrl.pathname.endsWith('/download/document700005'),
+        'delayed voice did not use metadata written after the click');
+      document.body.dataset.testProgress = 'delayed-downloaded';
+
+      secondVideo.scrollIntoView({ block: 'center' });
+      await settleLayout();
+      pointAt(secondVideo);
+      await settleLayout();
+      assert(host.dataset.activeKind === 'video' && !shadowButton.hidden,
+        'streaming-save video was not selected');
+
+      const fallbackCountBeforeStreaming = window.fixture.shadowDownloads.length;
+      const pageUrlBeforeStreaming = location.href;
+      installStreamingSaveMocks();
+      try {
+        window.fixture.streamMode = 'success';
+        window.fixture.streamChunkDelays = [3000];
+        const successFetchIndex = window.fixture.streamFetches.length;
+        shadowButton.click();
+        await waitFor(
+          () => window.fixture.streamSaveAttempts[0]?.createWritableCalls === 1,
+          'streaming save did not create its writable'
+        );
+        await wait(2300);
+        assert(shadowButton.dataset.state === 'busy' && shadowButton.disabled,
+          'an earlier completion timer re-enabled the button during an active download');
+        await waitFor(
+          () => window.fixture.streamSaveAttempts[0]?.closed === true,
+          'successful range download was not streamed to the selected file',
+          5000
+        );
+        window.fixture.streamChunkDelays = [];
+
+        const successfulSave = window.fixture.streamSaveAttempts[0];
+        const successfulFetches = window.fixture.streamFetches.slice(successFetchIndex);
+        assert(successfulSave.options?.suggestedName === '800002.mp4',
+          'showSaveFilePicker did not receive the resolved filename');
+        assert(successfulSave.createWritableCalls === 1,
+          'streaming save did not create exactly one writable');
+        assert(successfulSave.chunks.join(',') === window.fixture.streamPayload.join(','),
+          'ordered range response bytes were not written to the selected file');
+        assert(!successfulSave.aborted, 'successful writable was unexpectedly aborted');
+        assert(successfulFetches.length >= 3,
+          'successful streaming save did not issue multiple range requests');
+
+        let expectedStart = 0;
+        successfulFetches.forEach((request) => {
+          const requestedRange = request.range?.match(/^bytes=(\d+)-(\d+)$/);
+          assert(requestedRange, 'streaming fetch omitted a bounded Range header');
+          assert(Number(requestedRange[1]) === expectedStart,
+            'streaming range requests were not sequential');
+          assert(Number(requestedRange[2]) >= Number(requestedRange[1]),
+            'streaming range request had an invalid end offset');
+          assert(request.servedStart === expectedStart && request.servedEnd >= request.servedStart,
+            'streaming download did not accept the returned Content-Range');
+          assert(request.pageUrl === pageUrlBeforeStreaming,
+            'range download was not fetched in the current page');
+
+          const streamedUrl = new URL(request.url);
+          assert(streamedUrl.pathname.endsWith('/progressive/document800002'),
+            'streaming fetch did not use the Telegram progressive URL');
+          assert(streamedUrl.searchParams.get('account') === '2',
+            'streaming progressive URL did not preserve account=2');
+          assert(!streamedUrl.searchParams.has('download') &&
+            !streamedUrl.searchParams.has('filename'),
+          'streaming progressive URL included navigation-download parameters');
+          expectedStart = request.servedEnd + 1;
+        });
+        assert(expectedStart === window.fixture.streamPayload.length,
+          'streaming range requests did not cover the complete response');
+        assert(window.fixture.shadowDownloads.length === fallbackCountBeforeStreaming &&
+          location.href === pageUrlBeforeStreaming,
+        'successful streaming save also created a fallback anchor or navigation');
+
+        pointAt(secondVideo);
+        await settleLayout();
+        window.fixture.streamMode = 'http500';
+        const errorSaveIndex = window.fixture.streamSaveAttempts.length;
+        const errorFetchIndex = window.fixture.streamFetches.length;
+        shadowButton.click();
+        await waitFor(
+          () => window.fixture.streamFetches.length === errorFetchIndex + 1,
+          'HTTP 500 streaming request was not made'
+        );
+        await waitFor(
+          () => shadowButton.dataset.state === 'error',
+          'HTTP 500 response did not put the download control into an error state'
+        );
+
+        const failedSave = window.fixture.streamSaveAttempts[errorSaveIndex];
+        const errorToast = host.shadowRoot.querySelector('.toast');
+        assert(failedSave?.createWritableCalls === 0 && failedSave.chunks.length === 0,
+          'HTTP 500 response created or wrote the selected file');
+        assert(errorToast?.dataset.kind === 'error' && errorToast.textContent.trim(),
+          'HTTP 500 error was not surfaced to the user');
+        assert(window.fixture.shadowDownloads.length === fallbackCountBeforeStreaming &&
+          location.href === pageUrlBeforeStreaming,
+        'HTTP 500 response triggered a fallback anchor or top-level navigation');
+
+        pointAt(secondVideo);
+        await settleLayout();
+        window.fixture.streamMode = 'timeout';
+        const timeoutSaveIndex = window.fixture.streamSaveAttempts.length;
+        const timeoutFetchIndex = window.fixture.streamFetches.length;
+        shadowButton.click();
+        await waitFor(
+          () => window.fixture.streamFetches.length === timeoutFetchIndex + 1,
+          'timed-out streaming request was not made'
+        );
+        await waitFor(
+          () => shadowButton.dataset.state === 'error',
+          'streaming timeout did not put the download control into an error state'
+        );
+
+        const timedOutSave = window.fixture.streamSaveAttempts[timeoutSaveIndex];
+        const timedOutFetch = window.fixture.streamFetches[timeoutFetchIndex];
+        assert(timedOutFetch.hasAbortSignal,
+          'streaming request did not provide an abort signal for timeout handling');
+        assert(timedOutSave?.createWritableCalls === 0 && timedOutSave.chunks.length === 0,
+          'streaming timeout created or wrote the selected file');
+        assert(window.fixture.shadowDownloads.length === fallbackCountBeforeStreaming &&
+          location.href === pageUrlBeforeStreaming,
+        'streaming timeout triggered a fallback anchor or top-level navigation');
+
+        pointAt(secondVideo);
+        await settleLayout();
+        window.fixture.streamMode = 'abort';
+        const cancelSaveIndex = window.fixture.streamSaveAttempts.length;
+        const fetchCountBeforeCancel = window.fixture.streamFetches.length;
+        shadowButton.click();
+        await waitFor(
+          () => window.fixture.streamSaveAttempts.length === cancelSaveIndex + 1,
+          'cancelled picker attempt was not observed'
+        );
+        await waitFor(
+          () => shadowButton.dataset.state !== 'busy',
+          'cancelled picker left the download control busy'
+        );
+        await wait(80);
+
+        const cancelledSave = window.fixture.streamSaveAttempts[cancelSaveIndex];
+        assert(cancelledSave.mode === 'abort' && cancelledSave.createWritableCalls === 0,
+          'AbortError cancellation unexpectedly created a writable');
+        assert(window.fixture.streamFetches.length === fetchCountBeforeCancel,
+          'AbortError cancellation still fetched the download URL');
+        assert(window.fixture.shadowDownloads.length === fallbackCountBeforeStreaming &&
+          location.href === pageUrlBeforeStreaming,
+        'AbortError cancellation fell back to an anchor or Chrome navigation');
+      } finally {
+        restoreStreamingSaveMocks();
+      }
+
+      const fallbackPickerDescriptor = Object.getOwnPropertyDescriptor(window, 'showSaveFilePicker');
+      Object.defineProperty(window, 'showSaveFilePicker', {
+        configurable: true,
+        writable: true,
+        value: undefined,
+      });
+      try {
+        pointAt(secondVideo);
+        await settleLayout();
+        const fallbackDownloadIndex = window.fixture.shadowDownloads.length;
+        shadowButton.click();
+        await waitFor(
+          () => window.fixture.shadowDownloads.length === fallbackDownloadIndex + 1,
+          'unavailable file picker did not fall back to a download anchor'
+        );
+
+        const fallbackDownload = window.fixture.shadowDownloads[fallbackDownloadIndex];
+        const fallbackUrl = new URL(fallbackDownload.url);
+        assert(fallbackDownload.name === '800002.mp4',
+          'fallback anchor did not preserve the resolved filename');
+        assert(fallbackUrl.pathname.endsWith('/download/document800002') &&
+          fallbackUrl.searchParams.get('account') === '2' &&
+          fallbackUrl.searchParams.has('download'),
+        'fallback anchor did not use the Telegram navigation-download URL');
+        assert(location.href === pageUrlBeforeStreaming,
+          'fallback anchor navigated the top-level fixture page');
+      } finally {
+        if (fallbackPickerDescriptor) {
+          Object.defineProperty(window, 'showSaveFilePicker', fallbackPickerDescriptor);
+        } else {
+          delete window.showSaveFilePicker;
+        }
+      }
+      document.body.dataset.testProgress = 'streaming-save-checked';
+
+      const buttonPositionBeforeOneTime = `${shadowButton.style.left}|${shadowButton.style.top}`;
+      pointAt(document.getElementById('one-time-voice'));
+      await settleLayout();
+      assert(`${shadowButton.style.left}|${shadowButton.style.top}` === buttonPositionBeforeOneTime,
+        'one-time voice became the active download target');
+      assert(!document.querySelector('#one-time-voice .download-button'),
+        'one-time voice received a download button');
+
+      document.getElementById('main-voice-message').remove();
+      document.getElementById('second-video-message').remove();
+      document.getElementById('native-audio-message').remove();
+      document.getElementById('delayed-voice-message').remove();
+      document.getElementById('pending-video-message').remove();
+      window[INSTANCE_KEY].refresh();
+      await settleLayout();
+      assert(shadowButton.hidden, 'button remained visible when only one-time voice was present');
+      assert(!host.hasAttribute('data-active-kind'), 'one-time voice was selected during refresh');
+      document.body.dataset.testProgress = 'one-time-checked';
+
+      await wait(50);
+      let totalMutationRecords = 0;
+      let hostWriteRecords = 0;
+      const mutationObserver = new MutationObserver((records) => {
+        totalMutationRecords += records.length;
+        for (const record of records) {
+          if (record.target === host ||
+              Array.from(record.addedNodes).includes(host) ||
+              Array.from(record.removedNodes).includes(host)) {
+            hostWriteRecords += 1;
+          }
+        }
+      });
+      mutationObserver.observe(document.documentElement, {
+        attributes: true,
+        childList: true,
+        subtree: true,
+      });
+
+      const mutationSurface = document.getElementById('mutation-surface');
+      const mutationCount = 1500;
+      for (let index = 0; index < mutationCount; index += 1) {
+        const node = document.createElement('span');
+        node.dataset.telegramMutation = String(index);
+        mutationSurface.appendChild(node);
+        node.remove();
+      }
+      await wait(120);
+      mutationObserver.disconnect();
+
+      assert(totalMutationRecords === mutationCount * 2,
+        `unexpected light-DOM writeback: ${totalMutationRecords} records for ${mutationCount * 2} mutations`);
+      assert(hostWriteRecords === 0, 'Telegram mutations triggered downloader host writeback');
+      assert(document.querySelectorAll(`#${HOST_ID}`).length === 1,
+        'Telegram mutations duplicated or removed the downloader host');
+      assertUntouchedPrototypes();
+      assert(window.fixture.errors.length === 0,
+        `fixture observed runtime errors: ${window.fixture.errors.join(' | ')}`);
+      assert(window.fixture.shadowDownloads.length === 6,
+        'unexpected number of generated Shadow DOM downloads');
+      assert(window.fixture.shadowDownloads.every((download) =>
+        download.name && new URL(download.url).origin === location.origin),
+      'Telegram download anchors did not preserve local URLs and filenames');
+
+      delete document.body.dataset.testError;
+      document.body.dataset.testResult = 'passed';
+      document.body.dataset.testDetails = JSON.stringify({
+        voice: window.fixture.shadowDownloads[0],
+        video: window.fixture.shadowDownloads[1],
+        viewerVideo: window.fixture.shadowDownloads[2],
+        pendingVideo: window.fixture.shadowDownloads[3],
+        delayedVoice: window.fixture.shadowDownloads[4],
+        fallbackAnchor: window.fixture.shadowDownloads[5],
+        streamedRanges: window.fixture.streamFetches
+          .filter((request) => request.mode === 'success')
+          .map((request) => request.range),
+        streamedBytes: window.fixture.streamSaveAttempts[0]?.chunks,
+        http500NoFile: window.fixture.streamSaveAttempts[1]?.createWritableCalls === 0,
+        timeoutNoFile: window.fixture.streamSaveAttempts[2]?.createWritableCalls === 0,
+        abortNoFallback: window.fixture.streamSaveAttempts[3]?.createWritableCalls === 0,
+        nativeCalls: window.fixture.nativeClickCalls,
+        viewerButtonGeometry: window.fixture.viewerButtonGeometry,
+        oneTimeHidden: shadowButton.hidden,
+        stressMutations: totalMutationRecords,
+        hostWriteRecords,
+      });
+    }
+
+    window.addEventListener('load', () => {
+      window.setTimeout(() => {
+        runFixture().catch((error) => {
+          console.error(error);
+          document.body.dataset.testResult = 'failed';
+          document.body.dataset.testError = error.stack || error.message;
+        });
+      }, 0);
+    }, { once: true });
+
+    window.setTimeout(() => {
+      if (!document.body.dataset.testResult) {
+        document.body.dataset.testResult = 'failed';
+        document.body.dataset.testError = 'fixture timeout';
+      }
+    }, 12000);
+  </script>
+</body>
+</html>

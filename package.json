@@ -1,0 +1,25 @@
+{
+  "name": "web-audio-download-scripts",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tampermonkey userscripts for saving permitted web media",
+  "author": "BreakZhu",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/BreakZhu/web-audio-download-scripts.git"
+  },
+  "bugs": {
+    "url": "https://github.com/BreakZhu/web-audio-download-scripts/issues"
+  },
+  "homepage": "https://github.com/BreakZhu/web-audio-download-scripts#readme",
+  "type": "module",
+  "scripts": {
+    "check": "node scripts/check-userscripts.mjs",
+    "test": "npm run check && node scripts/run-fixtures.mjs",
+    "test:fixtures": "node scripts/run-fixtures.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT"
+}

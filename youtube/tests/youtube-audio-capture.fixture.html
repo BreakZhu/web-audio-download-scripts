@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <base href="/youtube/tests/">
+  <title>A/B: "Fixture"? * Track - YouTube</title>
+  <style>
+    html, body { margin: 0; min-height: 100%; background: #0f0f0f; color: #fff; }
+    .html5-video-player { position: relative; width: 640px; height: 408px; }
+    video { display: block; width: 640px; height: 360px; background: #181818; }
+    .ytp-chrome-controls { height: 48px; }
+    .ytp-right-controls,
+    ytmusic-player-bar .right-controls-buttons {
+      display: flex;
+      justify-content: flex-end;
+      height: 48px;
+    }
+    .ytp-button { border: 0; background: transparent; }
+  </style>
+  <script>
+    history.replaceState(null, '', '/watch?v=fixture-one');
+
+    window.fixture = {
+      anchorDownloads: [],
+      captureStreams: [],
+      clickPhase: false,
+      errors: [],
+      mimeChecks: [],
+      objectUrls: [],
+      pickerAttempts: [],
+      recorders: [],
+      recorderSequence: 0,
+    };
+
+    window.addEventListener('error', (event) => {
+      window.fixture.errors.push(event.error?.stack || event.message || 'window error');
+    });
+    window.addEventListener('unhandledrejection', (event) => {
+      window.fixture.errors.push(event.reason?.stack || String(event.reason));
+    });
+
+    class FakeTrack extends EventTarget {
+      constructor(kind) {
+        super();
+        this.kind = kind;
+        this.readyState = 'live';
+        this.stopCalls = 0;
+      }
+
+      stop() {
+        this.stopCalls += 1;
+        this.readyState = 'ended';
+      }
+    }
+
+    class FakeMediaStream {
+      constructor(tracks = []) {
+        this.tracks = Array.from(tracks);
+      }
+
+      getAudioTracks() {
+        return this.tracks.filter((track) => track.kind === 'audio');
+      }
+
+      getTracks() {
+        return Array.from(this.tracks);
+      }
+    }
+
+    class FakeMediaRecorder extends EventTarget {
+      static isTypeSupported(mimeType) {
+        window.fixture.mimeChecks.push(mimeType);
+        return mimeType === 'audio/webm;codecs=opus';
+      }
+
+      constructor(stream, options = {}) {
+        super();
+        this.id = ++window.fixture.recorderSequence;
+        this.stream = stream;
+        this.mimeType = options.mimeType || '';
+        this.audioBitsPerSecond = options.audioBitsPerSecond;
+        this.state = 'inactive';
+        this.emitted = [];
+        this.stopCalls = 0;
+        this.timers = [];
+        window.fixture.recorders.push(this);
+      }
+
+      emitChunk(suffix, force = false) {
+        if (!force && this.state !== 'recording') return;
+        const value = `r${this.id}:${suffix}`;
+        const event = new Event('dataavailable');
+        Object.defineProperty(event, 'data', {
+          configurable: true,
+          value: new Blob([value], { type: this.mimeType }),
+        });
+        this.emitted.push(value);
+        this.dispatchEvent(event);
+      }
+
+      start(timeslice) {
+        if (this.state !== 'inactive') throw new DOMException('Already recording', 'InvalidStateError');
+        this.state = 'recording';
+        this.timeslice = timeslice;
+        this.timers.push(window.setTimeout(() => this.emitChunk('a'), 0));
+        this.timers.push(window.setTimeout(() => this.emitChunk('b'), 8));
+      }
+
+      stop() {
+        if (this.state === 'inactive') throw new DOMException('Already stopped', 'InvalidStateError');
+        this.stopCalls += 1;
+        this.timers.forEach((timer) => window.clearTimeout(timer));
+        this.state = 'inactive';
+        window.queueMicrotask(() => {
+          this.emitChunk('final', true);
+          window.queueMicrotask(() => this.dispatchEvent(new Event('stop')));
+        });
+      }
+    }
+
+    Object.defineProperty(window, 'MediaStream', {
+      configurable: true,
+      writable: true,
+      value: FakeMediaStream,
+    });
+    Object.defineProperty(window, 'MediaRecorder', {
+      configurable: true,
+      writable: true,
+      value: FakeMediaRecorder,
+    });
+
+    function createWritableAttempt(options) {
+      const attempt = {
+        aborted: false,
+        closeCalls: 0,
+        closeOrder: 0,
+        closed: false,
+        handleName: options.suggestedName,
+        invokedWrites: [],
+        options,
+        synchronous: window.fixture.clickPhase,
+        writeOrder: 0,
+        writes: [],
+      };
+      window.fixture.pickerAttempts.push(attempt);
+      let sequence = 0;
+
+      return {
+        attempt,
+        handle: {
+          name: options.suggestedName,
+          async createWritable() {
+            return {
+              async write(blob) {
+                const value = await blob.text();
+                attempt.invokedWrites.push(value);
+                const delay = sequence++ === 0 ? 30 : 0;
+                await new Promise((resolve) => window.setTimeout(resolve, delay));
+                attempt.writes.push(value);
+                attempt.writeOrder += 1;
+              },
+              async close() {
+                attempt.closeCalls += 1;
+                attempt.closed = true;
+                attempt.closeOrder = attempt.writeOrder + 1;
+              },
+              async abort() {
+                attempt.aborted = true;
+              },
+            };
+          },
+        },
+      };
+    }
+
+    function installSavePicker() {
+      Object.defineProperty(window, 'showSaveFilePicker', {
+        configurable: true,
+        writable: true,
+        value: (options) => Promise.resolve(createWritableAttempt(options).handle),
+      });
+    }
+    installSavePicker();
+
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      writable: true,
+      value: (blob) => {
+        const url = `blob:youtube-fixture-${window.fixture.objectUrls.length + 1}`;
+        window.fixture.objectUrls.push({ blob, url });
+        return url;
+      },
+    });
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      writable: true,
+      value: () => undefined,
+    });
+    HTMLAnchorElement.prototype.click = function() {
+      window.fixture.anchorDownloads.push({ name: this.download, url: this.href });
+    };
+
+    function configureVideo(video) {
+      Object.defineProperty(video, 'paused', {
+        configurable: true,
+        get: () => false,
+      });
+      video.captureStream = () => {
+        const audioTrack = new FakeTrack('audio');
+        const videoTrack = new FakeTrack('video');
+        const stream = new FakeMediaStream([audioTrack, videoTrack]);
+        stream.owner = video;
+        window.fixture.captureStreams.push(stream);
+        return stream;
+      };
+      return video;
+    }
+
+    function createPlayer(id) {
+      const player = document.createElement('div');
+      player.id = 'movie_player';
+      player.className = 'html5-video-player';
+      player.dataset.fixtureId = id;
+
+      const video = configureVideo(document.createElement('video'));
+      video.className = 'html5-main-video';
+      const chrome = document.createElement('div');
+      chrome.className = 'ytp-chrome-controls';
+      const controls = document.createElement('div');
+      controls.className = 'ytp-right-controls';
+      const nativeButton = document.createElement('button');
+      nativeButton.type = 'button';
+      nativeButton.className = 'ytp-button fixture-native-button';
+      controls.appendChild(nativeButton);
+      chrome.appendChild(controls);
+      player.append(video, chrome);
+      return { controls, player, video };
+    }
+
+    function createMusicPlayer(id) {
+      const player = document.createElement('ytmusic-player-bar');
+      player.dataset.fixtureId = id;
+
+      const video = configureVideo(document.createElement('video'));
+      video.style.display = 'none';
+      const controls = document.createElement('div');
+      controls.className = 'right-controls-buttons';
+      const nativeButton = document.createElement('button');
+      nativeButton.type = 'button';
+      nativeButton.className = 'fixture-native-button';
+      controls.appendChild(nativeButton);
+      player.append(video, controls);
+      return { controls, player, video };
+    }
+
+    window.fixturePrototypeSnapshot = {
+      addEventListener: EventTarget.prototype.addEventListener,
+      appendChild: Node.prototype.appendChild,
+      captureStream: Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'captureStream'),
+      mediaRecorder: window.MediaRecorder,
+      mediaStream: window.MediaStream,
+      play: HTMLMediaElement.prototype.play,
+      pushState: history.pushState,
+      removeEventListener: EventTarget.prototype.removeEventListener,
+      urlCreateObjectUrl: URL.createObjectURL,
+    };
+  </script>
+</head>
+<body>
+  <h1 class="ytd-watch-metadata"><yt-formatted-string>A/B: "Fixture"? * Track</yt-formatted-string></h1>
+  <div id="player-slot"></div>
+  <script>
+    window.fixturePlayer = createPlayer('one');
+    document.getElementById('player-slot').appendChild(window.fixturePlayer.player);
+  </script>
+  <script src="../youtube-audio-capture.user.js"></script>
+  <script>
+    function wait(milliseconds) {
+      return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+    }
+
+    async function waitFor(predicate, message, timeout = 4000) {
+      const deadline = performance.now() + timeout;
+      while (!predicate()) {
+        if (performance.now() >= deadline) throw new Error(message);
+        await wait(15);
+      }
+    }
+
+    function assert(condition, message) {
+      if (!condition) throw new Error(message);
+    }
+
+    function clickWithActivation(button) {
+      window.fixture.clickPhase = true;
+      button.click();
+      window.fixture.clickPhase = false;
+    }
+
+    function assertTracksStopped(stream, message) {
+      assert(stream.getTracks().every((track) => track.stopCalls === 1), message);
+    }
+
+    function assertPrototypesUntouched() {
+      const snapshot = window.fixturePrototypeSnapshot;
+      assert(EventTarget.prototype.addEventListener === snapshot.addEventListener,
+        'userscript replaced EventTarget.addEventListener');
+      assert(EventTarget.prototype.removeEventListener === snapshot.removeEventListener,
+        'userscript replaced EventTarget.removeEventListener');
+      assert(Node.prototype.appendChild === snapshot.appendChild,
+        'userscript replaced Node.appendChild');
+      assert(HTMLMediaElement.prototype.play === snapshot.play,
+        'userscript replaced HTMLMediaElement.play');
+      const descriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'captureStream');
+      assert(descriptor?.value === snapshot.captureStream?.value &&
+        descriptor?.get === snapshot.captureStream?.get &&
+        descriptor?.set === snapshot.captureStream?.set,
+      'userscript changed HTMLMediaElement.captureStream');
+      assert(history.pushState === snapshot.pushState, 'userscript replaced history.pushState');
+      assert(window.MediaRecorder === snapshot.mediaRecorder, 'userscript replaced MediaRecorder');
+      assert(window.MediaStream === snapshot.mediaStream, 'userscript replaced MediaStream');
+      assert(URL.createObjectURL === snapshot.urlCreateObjectUrl,
+        'userscript replaced URL.createObjectURL');
+    }
+
+    async function loadDuplicateScript() {
+      await new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = '../youtube-audio-capture.user.js?duplicate=1';
+        script.onload = resolve;
+        script.onerror = () => reject(new Error('duplicate userscript did not load'));
+        document.head.appendChild(script);
+      });
+    }
+
+    async function runFixture() {
+      if (document.readyState !== 'complete') {
+        await new Promise((resolve) => window.addEventListener('load', resolve, { once: true }));
+      }
+
+      await waitFor(
+        () => window.fixturePlayer.controls.querySelector('#yt-audio-capture-button'),
+        'audio capture button was not mounted in the right controls'
+      );
+      let captureButton = document.getElementById('yt-audio-capture-button');
+      const initialButton = captureButton;
+      assert(document.querySelectorAll('#yt-audio-capture-button').length === 1,
+        'initial injection created duplicate buttons');
+      assert(captureButton.parentElement === window.fixturePlayer.controls,
+        'capture button was not inserted into the right controls');
+      assert(captureButton.querySelector('svg') && !captureButton.textContent.trim(),
+        'capture control is not an icon-only button');
+      const buttonRect = captureButton.getBoundingClientRect();
+      assert(buttonRect.width === 48 && buttonRect.height === 48,
+        'capture button did not keep its stable 48px dimensions');
+
+      clickWithActivation(captureButton);
+      await waitFor(() => captureButton.dataset.state === 'recording',
+        'streaming capture did not enter recording state');
+      const manualRecorder = window.fixture.recorders[0];
+      const manualAttempt = window.fixture.pickerAttempts[0];
+      assert(manualAttempt?.synchronous, 'showSaveFilePicker was not called during the click stack');
+      assert(manualAttempt.options.suggestedName.endsWith('.webm') &&
+        !/[<>:"/\\|?*]/.test(manualAttempt.options.suggestedName),
+      'suggested filename was not sanitized');
+      assert(manualRecorder.mimeType === 'audio/webm;codecs=opus' &&
+        manualRecorder.audioBitsPerSecond === 192000 && manualRecorder.timeslice === 1000,
+      'recorder did not select the supported Opus format, bitrate and timeslice');
+      assert(manualRecorder.stream.getTracks().every((track) => track.kind === 'audio'),
+        'video tracks were passed to the audio recorder');
+      await waitFor(() => manualRecorder.emitted.length >= 2,
+        'manual recording did not emit its live chunks');
+      clickWithActivation(captureButton);
+      window.fixturePlayer.video.dispatchEvent(new Event('ended'));
+      await waitFor(() => manualAttempt.closed, 'manual stop did not close the writable stream');
+      assert(manualAttempt.writes.join(',') === 'r1:a,r1:b,r1:final',
+        'audio chunks were not written sequentially before close');
+      assert(manualAttempt.closeOrder === manualAttempt.writes.length + 1 && !manualAttempt.aborted,
+        'writable stream closed before all chunks or was unexpectedly aborted');
+      assert(manualAttempt.closeCalls === 1 && manualRecorder.stopCalls === 1,
+        'duplicate stop signals stopped the recorder or closed the writer more than once');
+      assertTracksStopped(window.fixture.captureStreams[0],
+        'manual stop did not clean every captured track');
+      await waitFor(() => captureButton.dataset.state === 'idle',
+        'manual stop did not restore the idle button state');
+
+      clickWithActivation(captureButton);
+      await waitFor(() => window.fixture.recorders.length === 2 &&
+        window.fixture.recorders[1].state === 'recording',
+      'ended-event capture did not start');
+      const endedRecorder = window.fixture.recorders[1];
+      const endedAttempt = window.fixture.pickerAttempts[1];
+      await waitFor(() => endedRecorder.emitted.length >= 1,
+        'ended-event capture did not emit audio');
+      window.fixturePlayer.video.dispatchEvent(new Event('ended'));
+      await waitFor(() => endedAttempt.closed, 'video ended event did not close the writable stream');
+      assert(endedRecorder.state === 'inactive', 'video ended event did not stop MediaRecorder');
+      assertTracksStopped(window.fixture.captureStreams[1],
+        'video ended event did not clean captured tracks');
+
+      clickWithActivation(captureButton);
+      await waitFor(() => window.fixture.recorders.length === 3 &&
+        window.fixture.recorders[2].state === 'recording',
+      'navigation-stop capture did not start');
+      const navigationRecorder = window.fixture.recorders[2];
+      const navigationAttempt = window.fixture.pickerAttempts[2];
+      await waitFor(() => navigationRecorder.emitted.length >= 1,
+        'navigation-stop capture did not emit audio');
+      document.dispatchEvent(new Event('yt-navigate-start'));
+      history.pushState(null, '', '/results?search_query=fixture');
+      document.dispatchEvent(new Event('ytmusic-navigate-finish'));
+      await wait(40);
+      assert(navigationRecorder.state === 'recording' && !navigationAttempt.closed,
+        'same-player SPA navigation stopped the active audio capture');
+
+      history.pushState(null, '', '/watch?v=fixture-two');
+      const replacement = createMusicPlayer('two');
+      window.fixturePlayer.player.replaceWith(replacement.player);
+      window.fixturePlayer = replacement;
+      document.dispatchEvent(new Event('yt-navigate-finish'));
+      await waitFor(() => navigationAttempt.closed,
+        'YouTube navigation did not close the active writable stream');
+      await waitFor(
+        () => replacement.controls.querySelector('#yt-audio-capture-button'),
+        'capture button was not mounted in YouTube Music controls after SPA navigation'
+      );
+      captureButton = replacement.controls.querySelector('#yt-audio-capture-button');
+      assert(captureButton === initialButton,
+        'SPA navigation replaced the stable capture control instead of moving it');
+      assert(navigationRecorder.state === 'inactive', 'navigation did not stop MediaRecorder');
+      assertTracksStopped(window.fixture.captureStreams[2],
+        'navigation did not clean captured tracks');
+
+      await loadDuplicateScript();
+      for (let index = 0; index < 20; index += 1) {
+        document.dispatchEvent(new Event('yt-navigate-finish'));
+      }
+      await wait(80);
+      assert(document.querySelectorAll('#yt-audio-capture-button').length === 1 &&
+        replacement.controls.querySelector('#yt-audio-capture-button') === initialButton,
+      'duplicate script or SPA events duplicated the capture button');
+
+      Object.defineProperty(window, 'showSaveFilePicker', {
+        configurable: true,
+        writable: true,
+        value: undefined,
+      });
+      const downloadCount = window.fixture.anchorDownloads.length;
+      clickWithActivation(captureButton);
+      await waitFor(() => window.fixture.recorders.length === 4 &&
+        window.fixture.recorders[3].state === 'recording',
+      'Blob fallback capture did not start');
+      const fallbackRecorder = window.fixture.recorders[3];
+      await waitFor(() => fallbackRecorder.emitted.length >= 2,
+        'Blob fallback capture did not emit audio chunks');
+      clickWithActivation(captureButton);
+      await waitFor(() => window.fixture.anchorDownloads.length === downloadCount + 1,
+        'Blob fallback did not create a browser download');
+      const fallbackDownload = window.fixture.anchorDownloads.at(-1);
+      const fallbackObject = window.fixture.objectUrls.at(-1);
+      assert(fallbackDownload.name.endsWith('.webm') &&
+        !/[<>:"/\\|?*]/.test(fallbackDownload.name),
+      'Blob fallback filename was not sanitized');
+      assert(await fallbackObject.blob.text() === 'r4:ar4:br4:final',
+        'Blob fallback did not preserve ordered MediaRecorder chunks');
+      assertTracksStopped(window.fixture.captureStreams[3],
+        'Blob fallback stop did not clean captured tracks');
+
+      assertPrototypesUntouched();
+      assert(window.fixture.errors.length === 0,
+        `fixture observed runtime errors: ${window.fixture.errors.join(' | ')}`);
+
+      document.body.dataset.testResult = 'passed';
+      document.body.dataset.testDetails = JSON.stringify({
+        blobDownload: fallbackDownload,
+        buttonCount: document.querySelectorAll('#yt-audio-capture-button').length,
+        mimeType: manualRecorder.mimeType,
+        navigationStopped: navigationRecorder.state === 'inactive',
+        pickerSynchronous: manualAttempt.synchronous,
+        streamedWrites: manualAttempt.writes,
+        tracksStopped: window.fixture.captureStreams.every((stream) =>
+          stream.getTracks().every((track) => track.stopCalls === 1)),
+      });
+    }
+
+    window.setTimeout(() => {
+      runFixture().catch((error) => {
+        document.body.dataset.testResult = 'failed';
+        document.body.dataset.testError = error.stack || error.message;
+      });
+    }, 0);
+
+    window.setTimeout(() => {
+      if (!document.body.dataset.testResult) {
+        document.body.dataset.testResult = 'failed';
+        document.body.dataset.testError = 'fixture timeout';
+      }
+    }, 9000);
+  </script>
+</body>
+</html>
