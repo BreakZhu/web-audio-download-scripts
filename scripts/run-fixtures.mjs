@@ -126,6 +126,11 @@ class CdpClient {
 }
 
 async function startChrome(executable, profileDirectory) {
+  const ciArguments = process.env.CI ? [
+    '--disable-dev-shm-usage',
+    '--disable-setuid-sandbox',
+    '--no-sandbox',
+  ] : [];
   const child = spawn(executable, [
     '--headless=new',
     '--disable-background-networking',
@@ -135,8 +140,10 @@ async function startChrome(executable, profileDirectory) {
     '--disable-gpu',
     '--no-default-browser-check',
     '--no-first-run',
+    '--remote-allow-origins=*',
     '--remote-debugging-port=0',
     `--user-data-dir=${profileDirectory}`,
+    ...ciArguments,
     'about:blank',
   ], { stdio: ['ignore', 'ignore', 'pipe'] });
 
@@ -145,7 +152,7 @@ async function startChrome(executable, profileDirectory) {
       let stderr = '';
       const timer = setTimeout(
         () => rejectEndpoint(new Error(`Chrome did not expose CDP.\n${stderr}`)),
-        10000
+        20000
       );
       child.stderr.setEncoding('utf8');
       child.stderr.on('data', (chunk) => {
@@ -237,6 +244,7 @@ for (const fixturePath of fixturePaths) {
 }
 
 const chrome = await findChrome();
+console.log(`using Chrome: ${chrome}`);
 const profileDirectory = await mkdtemp(resolve(tmpdir(), 'web-audio-download-scripts-'));
 const server = await startStaticServer();
 const address = server.address();
